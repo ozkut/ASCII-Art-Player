@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "ASCII Art Player": {
+      "commandName": "Project",
+      "commandLineArgs": "default"
+    }
+  }
+}
