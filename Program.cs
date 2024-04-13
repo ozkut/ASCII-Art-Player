@@ -2,14 +2,16 @@
 using System.IO;
 using System.Linq;
 using System.Drawing;
+using FFMpegCore;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace ASCII_Art_Player
 {
     internal class Program
     {
         private static string framesPath, savePath;
-        private static double frameDelay = 25.2;
-        private static System.Timers.Timer timer = new(frameDelay);
+        private static double frameDelay;
+        private static System.Timers.Timer timer;
         private static StreamReader reader;
         private static int framesPlayed = 0;
         private static DateTime lastFrameEndTime;
@@ -17,12 +19,14 @@ namespace ASCII_Art_Player
         static void Main(string[] args)
         {
             System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High;
+            Console.CancelKeyPress += delegate { Exit(); };
 
             for (int i = 0; i < args.Length; i++)
             {
-                switch (args[i])
+                switch (args[i].ToLower())
                 {
                     case "--frame-delay":
+                    case "-fd":
                         if (args.Length >= 2 || double.TryParse(args[i + 1], out frameDelay))
                             i++;
                         else
@@ -34,9 +38,11 @@ namespace ASCII_Art_Player
                             Default();
                         break;
                     case "--create":
+                    case "-c":
                         AskForCreationPaths();
                         break;
                     case "--play":
+                    case "-p":
                         GetAsciiSaveLocation();
                         break;
                     default:
@@ -62,19 +68,40 @@ namespace ASCII_Art_Player
 
         private static void AskForCreationPaths()
         {
-            framesPath = GetInput("File path of folder containing frames: ").Trim('"');
-            while (!Directory.Exists(framesPath))
+            framesPath = GetInput("WARNING: This folder may get very big in size depending on the length and resolution of the video!\nPath to folder that contains frames (leave blank for Desktop): ").Trim('"');
+            if (framesPath != string.Empty)
             {
-                Console.Error.WriteLine("File can't be found!");
-                framesPath = GetInput("File path of folder containing frames: ").Trim('"');
+                while (!Directory.Exists(framesPath))
+                {
+                    Console.Error.WriteLine("File can't be found!");
+                    framesPath = GetInput("File path of folder containing frames: ").Trim('"');
+                }
             }
+            else
+                framesPath = Directory.CreateDirectory(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "frames")).FullName;
+
             savePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), GetInput("Name of ascii file: ") + ".txt");
             if (File.Exists(savePath))
             {
                 if (GetYesOrNo($"The ascii file at {savePath} already exists! Keep existing file?"))
                     Exit();
             }
+            ConvertVideoToFrames();
             GenerateAsciiArt();
+        }
+
+        private static void ConvertVideoToFrames()
+        {
+            string inputPath = GetInput("Video path:").Trim('"');
+            string outputPattern = Path.Combine(framesPath, "frame%04d.png");
+            Action<double> progressHandler = new(progress => { LoadingBar(progress, "Extracting frames "); });
+            FFMpegArguments.FromFileInput(inputPath)
+                           .OutputToFile(outputPattern, true, 
+                           options => options.Resize(Console.WindowWidth, Console.WindowHeight))
+                                             .NotifyOnProgress(progressHandler, FFProbe.Analyse(inputPath).Duration)
+                                             .ProcessSynchronously();
+            frameDelay = 1000 / FFProbe.Analyse(inputPath).PrimaryVideoStream!.FrameRate;
+            Console.WriteLine("\nExtraction complete!");
         }
 
         private static void GenerateAsciiArt()
@@ -96,24 +123,25 @@ namespace ASCII_Art_Player
             }
 
             string pixels = pixelTypes[option - 1];
-            FileSystemInfo[] frames = new DirectoryInfo(framesPath).GetFileSystemInfos().OrderBy(x => x.LastWriteTime).ToArray();
+            FileSystemInfo[] frames = new DirectoryInfo(framesPath).GetFileSystemInfos().OrderBy(x => x.Name).ToArray();
 
-            int frameIndex = 1;
             using StreamWriter writer = new(savePath);
+            writer.WriteLine(frameDelay);
+            int frameIndex = 1;
             for (int i = 0; i < frames.Length - 1; i++)
             {
                 Bitmap image = new(frames[frameIndex].FullName);
 
-                //stretch to console window dimensions
-                if (image.Height != Console.LargestWindowHeight || image.Width != Console.LargestWindowWidth)
-                    image = new(image, new(Console.LargestWindowWidth - 3, Console.LargestWindowHeight + 1));
+                //stretch to console window dimensions?
+                //if (image.Height != Console.WindowHeight || image.Width != Console.WindowWidth)
+                //    image = new(image, new(Console.WindowWidth - 3, Console.WindowHeight));
 
                 for (int y = 0; y < image.Height; y++)
                 {
                     for (int x = 0; x < image.Width; x++)
                     {
-                        Color color = image.GetPixel(x,y);
-                        double brightness = Math.Sqrt(color.R * color.R * .241 + color.G * color.G * .691 + color.B * color.B * .068);
+                        Color color = image.GetPixel(x, y);
+                        double brightness = Math.Sqrt(color.R * color.R * 0.241 + color.G * color.G * 0.691 + color.B * color.B * 0.068);
                         double index = brightness / 255 * (pixels.Length - 1);
                         char pixel = pixels[(int)Math.Round(index)];
                         writer.Write(pixel);
@@ -122,7 +150,7 @@ namespace ASCII_Art_Player
                     writer.WriteLine();
                 }
                 image.Dispose();
-                LoadingBar(frameIndex + 1, frames.Length, $"Loading file: {frames[frameIndex].FullName} ");
+                LoadingBar(frameIndex + 1, frames.Length, $"Loading file:{frames[frameIndex].Name} ");
                 frameIndex++;
             }
             Console.WriteLine();
@@ -162,6 +190,43 @@ namespace ASCII_Art_Player
             Console.CursorLeft = loadingBarLength + 3;
             Console.Write($"{percentage:0}% [{progress}/{total}] ");//display how many files are complete out of the number total files
             Console.Write(text);
+        }
+
+        private static void LoadingBar(double progress, string text)
+        {
+            Console.CursorVisible = false;
+            const int loadingBarLength = 20;
+
+            //write text before the loading bar
+            Console.CursorLeft = 0;
+            Console.Write(text);
+
+            //draw the start and end position of the progress bar
+            Console.Write('[');
+            Console.CursorLeft = text.Length + loadingBarLength + 1;
+            Console.Write(']');
+            Console.CursorLeft = text.Length;
+
+            float correctLoadingBarLength = loadingBarLength - 0.9f;
+            float loadingIndex = correctLoadingBarLength / 100;
+
+            int loadPosition = text.Length + 1;
+            //draw the complete part of the progress bar
+            for (int i = 0; i < loadingIndex * progress; i++)
+            {
+                Console.CursorLeft = loadPosition++;
+                Console.Write('#');
+            }
+
+            //draw the incomplete part of the progress bar
+            for (int j = loadPosition; j <= text.Length + loadingBarLength; j++)
+            {
+                Console.CursorLeft = loadPosition++;
+                Console.Write('-');
+            }
+
+            Console.CursorLeft = text.Length + loadingBarLength + 3;
+            Console.Write($"{progress:0.0}%");
         }
 
         private static void GetAsciiSaveLocation()
@@ -205,7 +270,7 @@ namespace ASCII_Art_Player
         private static void PlayFile()
         {
 #pragma warning disable CA1416
-            Console.SetWindowPosition(0,0);
+            Console.SetWindowPosition(0, 0);
             Console.SetWindowSize(Console.LargestWindowWidth, Console.LargestWindowHeight);
 #pragma warning restore CA1416
 
@@ -214,42 +279,41 @@ namespace ASCII_Art_Player
             Console.SetCursorPosition(0, 0);
 
             reader = new(savePath);
+            frameDelay = double.Parse(reader.ReadLine()!);
+            timer = new System.Timers.Timer(frameDelay - 5);
             timer.Start();
             DateTime startTime = DateTime.Now;
             timer.Elapsed += (sender, e) => DrawFrame(sender, e, startTime);
 
-            do
+            while (true)
             {
-                System.Threading.Thread.Sleep(750);
+                System.Threading.Thread.Sleep(1000/*750*/);
                 if (reader.EndOfStream)
                     Exit();
             }
-            while (true);
         }
 
         private static void DrawFrame(object? sender, System.Timers.ElapsedEventArgs e, DateTime startTime)
         {
             timer.Stop();
+            //Draw frame
+            Console.SetCursorPosition(0, 0);
+            for (int i = 0; i < (Console.WindowHeight / 2) - 10 + 1; i++) 
+                Console.Write($"\n{reader.ReadLine()}");
 
-            //Calculate accuracy
+            //Display debug info
+            double secondsPassed = (DateTime.Now - startTime).TotalSeconds;
             TimeSpan timePassed = TimeSpan.Zero;
             if (lastFrameEndTime != DateTime.Now)
                 timePassed = DateTime.Now - lastFrameEndTime;
-
-            //Display debug info
-            Console.SetCursorPosition(0, 0);
-            double secondsPassed = (DateTime.Now - startTime).TotalSeconds;
-            if (secondsPassed > 0)
-                Console.WriteLine($"FPS:{framesPlayed / secondsPassed:0.0} Frametime:{timePassed.TotalMilliseconds:0.0}ms Accuracy:{25.2 / timePassed.TotalMilliseconds * 100:0.0}% Playback time:{secondsPassed:0.0} Frames:{framesPlayed} ");
-
-            //Draw frame
-            for (int i = 0; i < 64; i++)
-                Console.WriteLine(reader.ReadLine());
-            Console.SetCursorPosition(0, 0);
-
+            Console.SetCursorPosition(0, 1);
+            Console.WriteLine($"FPS:{framesPlayed / secondsPassed:0.0} " +
+                              $"Frametime:{timePassed.TotalMilliseconds:0.0}ms " +
+                              $"Accuracy:{frameDelay / timePassed.TotalMilliseconds * 100:0.0}% " +
+                              $"Time:{secondsPassed:0.0}s " +
+                              $"Frames:{framesPlayed} ");
             framesPlayed++;
             lastFrameEndTime = DateTime.Now;
-
             timer.Start();
         }
 
